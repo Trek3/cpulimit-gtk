@@ -27,7 +27,7 @@ def scrape(out):
             pid = int(pid)
             cpu = float(cpu)
             mem = float(mem)
-            procs.append(Process(ppid, pid, cmd, cpu, mem, {}, False))
+            procs.append(Process(ppid, pid, cmd, cpu, mem))
             current_valid_pids.append(pid)
     
     return procs, current_valid_pids
@@ -86,15 +86,18 @@ def build_process_tree(ls, current_valid_pids):
     global processes
 
     for p in ls:
-
         ppid, pid = p.get_ppid(), p.get_pid()
         ret, proc = visit_process_tree(None, ppid, processes, True)
         if ret:
             if pid not in proc.get_subs():
                 proc.add_sub(p)
+            else:
+                proc.update(p)
         else:
             if pid not in processes:
                 processes[pid] = p
+            else:
+                processes[pid].update(p)
 
 
     check_process_validity(current_valid_pids)
@@ -127,7 +130,7 @@ class LimiterWindow(Gtk.Window):
         self.select.connect("changed", self.on_tree_selection_changed)
 
         for i, column_title in enumerate(
-            ["PID", "Command", "CPU usage", "Memory usage", "Active"]
+            ["PID", "Command", "CPU usage", "Memory usage", "Active", "Percentage"]
         ):
             renderer = Gtk.CellRendererText()
             column = Gtk.TreeViewColumn(column_title, renderer, text=i)
@@ -164,7 +167,7 @@ class LimiterWindow(Gtk.Window):
     def populate_treeview(self):
         global processes
 
-        process_tree = Gtk.TreeStore(int, str, float, float, str)
+        process_tree = Gtk.TreeStore(int, str, float, float, str, str)
 
         def aux(start, d, parent, root):
             if root:
@@ -194,7 +197,8 @@ class LimiterWindow(Gtk.Window):
                 active = proc.get_active()
 
                 if not active:
-                    cmd1 = "cpulimit -l {} -p {}".format(int(self.percentage.get_text()), current_selected_process)
+                    cmd1 = "cpulimit -i -l {} -p {}".format(int(self.percentage.get_text()), current_selected_process)
+                    proc.set_percentage(self.percentage.get_text())
                     print(cmd1)
                     limited[current_selected_process] = subprocess.Popen(cmd1, shell=True)
                 else:
