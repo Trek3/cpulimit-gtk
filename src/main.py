@@ -15,33 +15,98 @@ limited = dict()
 
 def scrape(out):
 
-    currpid = []
+    procs = []
+    current_valid_pids = []
     lines = out.decode("utf-8").split('\n')[1:]
     for line in lines:
         line = line.strip()
         line = line.split()
-        if len(line) == 4:
-            pid, cpu, mem, cmd = line
-            p = Process(int(pid), cmd, float(cpu), float(mem), False)
-            currpid.append(int(pid))
-            if int(pid) not in processes:
-                processes[int(pid)] = p
+        if len(line) == 5:
+            ppid, pid, cpu, mem, cmd = line
+            ppid = int(ppid)
+            pid = int(pid)
+            cpu = float(cpu)
+            mem = float(mem)
+            procs.append(Process(ppid, pid, cmd, cpu, mem, {}, False))
+            current_valid_pids.append(pid)
+    
+    return procs, current_valid_pids
 
-    temp = []
-    for pid in processes:
-        if pid not in currpid:
-            temp.append(pid)
+def visit_all(procs):
+    res = []
+    def aux(start, d, root):
+        if root:
+            for pid in d:
+                res.append(d[pid])
+                aux(pid, d, False)
+        else:
+            if start in d:
+                for pid in d[start].get_subs():
+                    res.append(d[start].get_subs()[pid])
+                    aux(pid, d[start].get_subs()[pid].get_subs(), False)
+    aux(None, procs, True)
 
-    for pid in temp:
-        print('deleting', processes[pid].to_list())
-        del processes[pid]
+    return res
+
+def visit_process_tree(start, end, d, root = False):
+    if root:
+        if end in d:
+            return True, d[end]
+        else:
+            for pid in d:
+                return visit_process_tree(pid, end, d, False)
+    else:
+        if start in d:
+            if end in d[start].get_subs():
+                return True, d[start].get_subs()[end]
+            for pid in d[start].get_subs():
+                return visit_process_tree(pid, end, d[start].get_subs()[pid].get_subs(), False)
+
+    return False, None
+
+def check_process_validity(current_valid_pids):
+
+    global processes
+
+    zombie_pids = []
+    all_procs = visit_all(processes)
+    for process in all_procs:
+        if process.get_pid() not in current_valid_pids:
+            zombie_pids.append(process.get_pid())
+
+
+    for pid in zombie_pids:
+        ret, proc = visit_process_tree(None, pid, processes, True)
+        if ret:
+            print('deleting', proc.to_list())
+            del processes[proc.get_pid()]
+
+def build_process_tree(ls, current_valid_pids):
+
+    global processes
+
+    for p in ls:
+
+        ppid, pid = p.get_ppid(), p.get_pid()
+        ret, proc = visit_process_tree(None, ppid, processes, True)
+        if ret:
+            if pid not in proc.get_subs():
+                proc.add_sub(p)
+        else:
+            if pid not in processes:
+                processes[pid] = p
+
+
+    check_process_validity(current_valid_pids)
 
 def populate_list():
 
-    cmd1 = "ps o pid,pcpu,pmem,comm"
+    cmd1 = "ps o ppid,pid,pcpu,pmem,comm"
     out, _ = subprocess.Popen(cmd1, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).communicate()
 
-    return scrape(out)
+    procs, valids = scrape(out)
+
+    build_process_tree(procs, valids)
 
 class LimiterWindow(Gtk.Window):
     def __init__(self):
@@ -99,11 +164,21 @@ class LimiterWindow(Gtk.Window):
     def populate_treeview(self):
         global processes
 
-        process_list = Gtk.ListStore(int, str, float, float, str)
-        for process in processes:
-            process_list.append(processes[process].to_list())
+        process_tree = Gtk.TreeStore(int, str, float, float, str)
 
-        return process_list
+        def aux(start, d, parent, root):
+            if root:
+                for pid in d:
+                    par = process_tree.append(None, d[pid].to_list())
+                    aux(pid, d, par, False)
+            else:
+                if start in d:
+                    for pid in d[start].get_subs():
+                        par = process_tree.append(parent, d[start].get_subs()[pid].to_list())
+                        aux(pid, d[start].get_subs()[pid].get_subs(), par, False)
+                
+        aux(None, processes, None, True)
+        return process_tree
 
     def on_update_button_clicked(self, widget):
         populate_list()
@@ -114,22 +189,21 @@ class LimiterWindow(Gtk.Window):
         global processes, limited
 
         if current_selected_process is not None:
-            active = processes[current_selected_process].get_active()
+            ret, proc = visit_process_tree(None, current_selected_process, processes, True)
+            if ret:
+                active = proc.get_active()
 
-            if not active:
-                cmd1 = "cpulimit -l {} -p {}".format(int(self.percentage.get_text()), current_selected_process)
-                print(cmd1)
-                limited[current_selected_process] = subprocess.Popen(cmd1, shell=True)
+                if not active:
+                    cmd1 = "cpulimit -l {} -p {}".format(int(self.percentage.get_text()), current_selected_process)
+                    print(cmd1)
+                    limited[current_selected_process] = subprocess.Popen(cmd1, shell=True)
+                else:
+                    if current_selected_process in limited:
+                        limited[current_selected_process].terminate()
+                        del limited[current_selected_process]
 
-                model, treeiter = self.treeview.get_selection().get_selected()
-                model[treeiter].modify_bg(Gtk.StateType.NORMAL, Gdk.Color(6400, 6400, 6440))
-            else:
-                if current_selected_process in limited:
-                    limited[current_selected_process].terminate()
-                    del limited[current_selected_process]
-
-            processes[current_selected_process].set_active(not active)
-            self.treeview.set_model(self.populate_treeview())
+                proc.set_active(not active)
+                self.treeview.set_model(self.populate_treeview())
 
     def on_tree_selection_changed(self, selection):
 
@@ -138,12 +212,14 @@ class LimiterWindow(Gtk.Window):
         model, treeiter = selection.get_selected()
         if treeiter is not None:
             current_selected_process = model[treeiter][0]
-            if processes[current_selected_process].get_active():
-                self.activate.set_label("Stop")
-                self.box.set_sensitive(False)
-            else:
-                self.activate.set_label("Limit")
-                self.box.set_sensitive(True)
+            ret, proc = visit_process_tree(None, current_selected_process, processes, True)
+            if ret:
+                if proc.get_active():
+                    self.activate.set_label("Stop")
+                    self.box.set_sensitive(False)
+                else:
+                    self.activate.set_label("Limit")
+                    self.box.set_sensitive(True)
 
 def main(config):
     window = LimiterWindow()
