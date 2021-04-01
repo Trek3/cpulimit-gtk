@@ -6,7 +6,7 @@ import subprocess
 import re
 
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
+from gi.repository import Gtk, GLib
 
 current_selected_process = None
 
@@ -78,7 +78,6 @@ def check_process_validity(current_valid_pids):
     for pid in zombie_pids:
         ret, proc = visit_process_tree(None, pid, processes, True)
         if ret:
-            print('deleting', proc.to_list())
             del processes[proc.get_pid()]
 
 def build_process_tree(ls, current_valid_pids):
@@ -122,7 +121,7 @@ class LimiterWindow(Gtk.Window):
         self.grid.set_row_homogeneous(True)
         self.add(self.grid)
 
-        populate_list()
+        GLib.timeout_add(1000, self.on_update_listener)
 
         # creating the treeview, making it use the filter as a model, and adding the columns
         self.treeview = Gtk.TreeView(model=self.populate_treeview())
@@ -162,6 +161,9 @@ class LimiterWindow(Gtk.Window):
         self.grid.attach_next_to(self.box, self.scrollable_treelist, Gtk.PositionType.BOTTOM, 10, 1)
         self.grid.attach_next_to(self.update, self.scrollable_treelist, Gtk.PositionType.TOP, 10, 1)
         self.grid.attach_next_to(self.activate, self.box, Gtk.PositionType.BOTTOM, 10, 1)
+
+        self.on_update_listener()
+
         self.show_all()
 
     def populate_treeview(self):
@@ -183,9 +185,22 @@ class LimiterWindow(Gtk.Window):
         aux(None, processes, None, True)
         return process_tree
 
-    def on_update_button_clicked(self, widget):
+    def on_update_listener(self):
+        self.select = self.treeview.get_selection()
+        model, treeiter = self.select.get_selected()
+
         populate_list()
         self.treeview.set_model(self.populate_treeview())
+        self.treeview.expand_all()
+
+        self.select = self.treeview.get_selection()
+        if treeiter is not None:
+            self.select.select_path(model.get_path(treeiter))
+
+        return True
+
+    def on_update_button_clicked(self, widget):
+        self.on_update_listener()
 
     def on_activate_button_clicked(self, widget):
 
@@ -207,7 +222,7 @@ class LimiterWindow(Gtk.Window):
                         del limited[current_selected_process]
 
                 proc.set_active(not active)
-                self.treeview.set_model(self.populate_treeview())
+                self.on_update_listener()
 
     def on_tree_selection_changed(self, selection):
 
@@ -225,9 +240,13 @@ class LimiterWindow(Gtk.Window):
                     self.activate.set_label("Limit")
                     self.box.set_sensitive(True)
 
+def all_quit(widget):
+    Gtk.main_quit()
+
 def main(config):
+
     window = LimiterWindow()
-    window.connect("destroy", Gtk.main_quit)
+    window.connect("destroy", all_quit)
     window.show_all()
 
     Gtk.main()
